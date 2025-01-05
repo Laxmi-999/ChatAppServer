@@ -48,37 +48,50 @@ io.on('connection', socket => {
                     {
                     const user = {userId, socketId: socket.id}
                     users.push(user);
+                    // console.log('users are ', users);
                     io.emit('getUsers', users);
                 } 
 
     });
       
-    socket.on('disconnect', () =>{
-        users = users.filter(user => user.socketId !== socket.id);
-        io.emit('getUsers', users);
-    })
-    console.log('users are', users);
 
-    socket.on('sendMessage', ({ senderId, receiverId, message, conversationId}) =>{
+    socket.on('sendMessage', async({ senderId, receiverId, message, conversationId}) =>{
 
-        console.log('senderId is ', senderId)
-       
-        const receiver = users.find(user => users.userId === receiverId);
-        const sender = users.find(user => users.userId === senderId);
-        // console.log('users are', users);
-        // console.log('sender is ', sender);
+        const receiver = users.find(user => user.userId === receiverId);
+        const sender = users.find(user => user.userId === senderId);
 
-        if(receiver){
+        const user = await Users.findById(senderId);
+
+
+        console.log('user or sender  is  ', user);
+        console.log('sender is ', sender);
+        console.log('receiver is ', receiver);
+
+        if (receiver && sender) {
+
             io.to(receiver.socketId).to(sender.socketId).emit('getMessage', {
                 senderId,
                 receiverId,
                 conversationId,
-                message
+                message,
+                user:{id:user._id, fullName:user.fullName, email:user.email}
+
+            });
+        }else{
+            io.to(sender.socketId).emit('getMessage', {
+                senderId,
+                receiverId,
+                conversationId,
+                message,
+                user:{id:user._id, fullName:user.fullName, email:user.email}
+
             });
         }
-    })
-
-
+    });
+    socket.on('disconnect', () =>{
+        users = users.filter(user => user.socketId !== socket.id);
+        io.emit('getUsers', users);
+    });
 
 });
 
@@ -333,6 +346,24 @@ app.get('/api/users', async (req, res) => {
 
     }
 })
+
+app.get('/api/conversation', async (req, res) => {
+    const { senderId, receiverId } = req.query;
+    try {
+        const conversation = await Conversation.findOne({
+            Members: { $all: [senderId, receiverId] }
+        });
+
+        if (conversation) {
+            return res.status(200).json({ conversationId: conversation._id });
+        } else {
+            return res.status(404).json({ message: 'No conversation found' });
+        }
+    } catch (error) {
+        console.error('Error fetching conversation:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
 
 app.listen(port, () => {
     console.log(`server started on  ${port}`);
