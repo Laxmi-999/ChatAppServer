@@ -1,234 +1,299 @@
+// Importing required modules
 const express = require('express');
 const bcryptjs = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
+const mongoose = require('mongoose'); // Mongoose is already imported, moved here for consistency with other imports
+
+// Initialize Express app
 const app = express();
+
+// Initialize Socket.io server
+// It's listening on port 8080 and allowing CORS from your client (http://localhost:3000)
 const io = require('socket.io')(8080, {
-    cors :{
-        origin:'http://localhost:3000'
+    cors: {
+        origin: 'http://localhost:3000'
     }
 });
 
-//Connecting Db
+// Connecting to MongoDB Database
+// Ensure your db/connection.js file properly connects to your MongoDB instance
 require('./db/connection');
 
-//importing files
+// Importing Mongoose Models
 const Users = require('./models/Users');
 const Conversation = require('./models/Conversation');
 const Messages = require('./models/Messages');
-const mongoose = require('mongoose');
 
+// Express App Middleware
+app.use(express.json()); // Enable Express to parse JSON request bodies
+app.use(cors());         // Enable CORS for all routes
 
-
-
-//app use
-app.use(express.json());
-
-app.use(cors());
-// app.use(express.urlencoded({ extended: false }));
+// Define the port for the Express HTTP server
 const port = 8000;
 
-
-
-
-//socket.io
-// for main connection 
+// =====================================
+// Socket.io Logic
+// =====================================
+// 'users' array to keep track of currently connected users and their socket IDs
 let users = [];
 
+// Socket.io connection event handler
 io.on('connection', socket => {
-    // inside it, performs two action 
+    console.log('A user connected:', socket.id);
 
-    console.log('user connected', socket.id);
-    //when server is receiving something from frontend it performs socket.on
-            socket.on('addUser', userId =>{
-
-                const isUserExist = users.find(user => user.userId === userId)
-                
-                if(!isUserExist)
-                    {
-                    const user = {userId, socketId: socket.id}
-                    users.push(user);
-                    // console.log('users are ', users);
-                    io.emit('getUsers', users);
-                } 
-
+    // Handler for 'addUser' event: Adds a user to the online users list
+    // This event is emitted by the client after login/initial connection
+    socket.on('addUser', userId => {
+        // Check if the user is already in the 'users' array
+        if (!users.some(user => user.userId === userId)) {
+            // If not present, add new user with their userId and current socketId
+            users.push({ userId, socketId: socket.id });
+        } else {
+            // If user already exists, update their socketId (e.g., if they reconnected or have multiple tabs)
+            const existingUserIndex = users.findIndex(user => user.userId === userId);
+            if (existingUserIndex !== -1) {
+                users[existingUserIndex].socketId = socket.id;
+            }
+        }
+        // Emit the updated list of online users to all connected clients
+        io.emit('getUsers', users);
+        console.log('Users online:', users);
     });
-      
 
-    socket.on('sendMessage', async({ senderId, receiverId, message, conversationId}) =>{
+    // Handler for 'sendMessage' event: Broadcasts a message to sender and receiver in real-time
+    // NOTE: This handler is *not* responsible for saving the message to the DB.
+    // The client should first send the message to the REST API for persistence.
+    socket.on('sendMessage', async ({ senderId, receiverId, message, conversationId, user }) => {
+        // Find the receiver's socket information
+        const receiverSocketInfo = users.find(onlineUser => onlineUser.userId === receiverId);
+        // Find the sender's socket information
+        const senderSocketInfo = users.find(onlineUser => onlineUser.userId === senderId);
 
-        const receiver = users.find(user => user.userId === receiverId);
-        const sender = users.find(user => user.userId === senderId);
+        // Construct the message data to be sent via sockets
+        const messageData = {
+            senderId,
+            receiverId,
+            conversationId,
+            message,
+            user: user || null, // Include user details passed from client
+            createdAt: new Date().toISOString() // Add timestamp for client-side sorting/keys
+        };
 
-        const user = await Users.findById(senderId);
+        // Emit message to the receiver if they are online
+        if (receiverSocketInfo) {
+            console.log(`Emitting message to receiver: ${receiverId} at socket: ${receiverSocketInfo.socketId}`);
+            io.to(receiverSocketInfo.socketId).emit('getMessage', messageData);
+        } else {
+            console.log(`Receiver ${receiverId} is offline. Message is saved to DB via API, but not sent via socket in real-time.`);
+        }
 
-
-        console.log('user or sender  is  ', user);
-        console.log('sender is ', sender);
-        console.log('receiver is ', receiver);
-
-        if (receiver && sender) {
-
-            io.to(receiver.socketId).to(sender.socketId).emit('getMessage', {
-                senderId,
-                receiverId,
-                conversationId,
-                message,
-                user:{id:user._id, fullName:user.fullName, email:user.email}
-
-            });
-        }else{
-            io.to(sender.socketId).emit('getMessage', {
-                senderId,
-                receiverId,
-                conversationId,
-                message,
-                user:{id:user._id, fullName:user.fullName, email:user.email}
-
-            });
+        // Emit message back to the sender (optional, but common for immediate feedback)
+        // This ensures the sender's UI updates even if they are talking to themselves or if only one tab is open.
+        if (senderSocketInfo) {
+            console.log(`Emitting message to sender: ${senderId} at socket: ${senderSocketInfo.socketId}`);
+            io.to(senderSocketInfo.socketId).emit('getMessage', messageData);
+        } else {
+            console.error(`Sender ${senderId} not found in active users during sendMessage emission.`);
         }
     });
-    socket.on('disconnect', () =>{
+
+    // Handler for 'disconnect' event: Removes a user from the online users list when they disconnect
+    socket.on('disconnect', () => {
+        console.log('A user disconnected:', socket.id);
+        // Filter out the disconnected user from the 'users' array
         users = users.filter(user => user.socketId !== socket.id);
+        // Emit the updated list of online users to all connected clients
         io.emit('getUsers', users);
+        console.log('Users online after disconnect:', users);
     });
-
 });
 
+// =====================================
+// REST API Routes
+// =====================================
 
-//routes
+// Basic welcome route for the server
 app.get('/', (req, res) => {
-    res.send('welcome');
-    res.end();
-    // console,log('welcome');
+    res.send('Welcome to the Chat App Server!');
 });
 
+// User Registration Route
 app.post('/api/register', async (req, res) => {
     try {
-        // console.log(req.body);
+        console.log('Register request body:', req.body);
         const { fullName, email, password } = req.body;
-        // console.log(email);
 
+        // Validate required fields
         if (!fullName || !email || !password) {
-            res.status(400).send('please fill all the fields');
-        } else {
-            const isAlreadyExits = await Users.findOne({ email });
-            if (isAlreadyExits) {
-                res.status(400).send('user  already exist');
-            }
-            else {
-                const newUser = new Users({ fullName, email });
-                bcryptjs.hash(password, 10, (err, hashedPassword) => {
-                    newUser.set('password', hashedPassword);
-                    newUser.save();
-                    // next();
-
-                })
-                return res.status(200).send('User registered successfully');
-            }
+            return res.status(400).send('Please fill all the fields');
         }
+
+        // Check if user already exists
+        const isAlreadyExits = await Users.findOne({ email });
+        if (isAlreadyExits) {
+            return res.status(400).send('User already exist');
+        }
+
+        // Create new user and hash password
+        const newUser = new Users({ fullName, email });
+        bcryptjs.hash(password, 10, async (err, hashedPassword) => {
+            if (err) {
+                console.error("Error hashing password:", err);
+                return res.status(500).json({ error: 'Failed to register user.' });
+            }
+            newUser.set('password', hashedPassword);
+            await newUser.save(); // Save the new user to DB
+            return res.status(200).send('User registered successfully');
+        });
+
     } catch (Err) {
-        console.log(Err, 'error');
+        console.error('Registration error:', Err);
+        res.status(500).json({ error: 'An error occurred during registration.' });
     }
-})
+});
 
-app.post('/api/login', async (req, res, next) => {
-
+// User Login Route
+app.post('/api/login', async (req, res) => {
     try {
-
         const { email, password } = req.body;
+        console.log('Login request body:', req.body);
 
+        // Validate required fields
         if (!email || !password) {
-            res.status(400).send('please fill all the fields');
+            return res.status(400).send('Please fill all the fields');
         }
-        else {
-            const User = await Users.findOne({ email });
-            if (!User) {
-                res.status(400).send('user not found !');
-            } else {
-                const ValidateUser = await bcryptjs.compare(password, User.password);
-                if (!ValidateUser) {
-                    res.status.apply(400).send('incorrect email or password');
 
-                } else {
-                    const payload = {
-                        userId: User.id,
-                        userEmail: User.email
-                    }
-                    const JWT_SECRETE_KEY = process.env.JWT_SECRETE_KEY || 'THIS_IS_JWT_SECRETE_KEY';
-                    jwt.sign(payload, JWT_SECRETE_KEY, { expiresIn: 84600 }, async (err, token) => {
+        // Find user by email
+        const User = await Users.findOne({ email });
+        if (!User) {
+            console.log("User not found for email:", email);
+            return res.status(400).send('User not found!');
+        }
 
-                        await Users.updateOne({ _id: User._id }, {
-                            $set: { token }
-                        })
-                        User.save();
-                        next();
-                    })
-                    res.status(200).json({ User: { id: User._id, email: User.email, fullName: User.fullName }, token: User.token });
+        // Validate password
+        const ValidateUser = await bcryptjs.compare(password, User.password);
+        if (!ValidateUser) {
+            return res.status(400).send('Incorrect email or password');
+        }
 
+        // Generate JWT token
+        const payload = {
+            userId: User._id,
+            userEmail: User.email
+        };
+        // Use environment variable for JWT secret key, with a fallback
+        const JWT_SECRETE_KEY = process.env.JWT_SECRETE_KEY || 'THIS_IS_A_VERY_STRONG_DEFAULT_JWT_SECRETE_KEY'; // Changed default key for better security
 
-                }
+        jwt.sign(payload, JWT_SECRETE_KEY, { expiresIn: '1d' }, async (err, token) => { // '1d' for 1 day expiration
+            if (err) {
+                console.error("JWT sign error:", err);
+                return res.status(500).json({ error: 'Failed to generate token.' });
             }
 
-        }
+            // Update user's token in the database
+            await Users.updateOne({ _id: User._id }, {
+                $set: { token: token }
+            });
+
+            console.log('User logged in successfully');
+            console.log(`Logged in user details: ID - ${User._id}, Email - ${User.email}, Full Name - ${User.fullName}`);
+
+            // Respond with user details and token
+            return res.status(200).json({
+                User: {
+                    id: User._id, // Use 'id' for consistency with client if preferred
+                    email: User.email,
+                    fullName: User.fullName
+                },
+                token: token
+            });
+        });
+
     } catch (error) {
-        console.log(error, 'error');
-
+        console.error('Login error:', error);
+        res.status(500).json({ error: 'An error occurred during login.' });
     }
+});
 
-})
+// Create Conversation Route (Note: This is mostly for initial conversation creation,
+// the /api/message POST route also handles 'new' conversation creation if needed)
 app.post('/api/conversation', async (req, res) => {
     try {
         const { senderId, receiverId } = req.body;
+        // Check if a conversation already exists between these members to avoid duplicates
+        const existingConversation = await Conversation.findOne({
+            Members: { $all: [senderId, receiverId] }
+        });
+
+        if (existingConversation) {
+            return res.status(200).json({
+                message: 'Conversation already exists',
+                conversationId: existingConversation._id
+            });
+        }
+
         const conversation = new Conversation({ Members: [senderId, receiverId] });
         await conversation.save();
-        res.status(200).send("conversation created successfully");
+        res.status(200).json({
+            message: "Conversation created successfully",
+            conversationId: conversation._id
+        });
     } catch (error) {
-        console.log(error, 'error');
+        console.error('Error creating conversation:', error);
+        res.status(500).json({ error: 'An error occurred while creating the conversation.' });
     }
-})
+});
 
-
+// Get Messages for a specific Conversation ID or check for existing conversation
 app.get('/api/message/:conversationId', async (req, res) => {
     try {
         const conversationId = req.params.conversationId;
-        // console.log('conversation ID is ', conversationId)
 
-
+        // If the client requests 'new', it means they are checking for an existing conversation
+        // or preparing to start a new one with a specific sender/receiver pair.
         if (conversationId === 'new') {
-            // Handle new conversation
+            const { senderId, receiverId } = req.query;
+            if (!senderId || !receiverId) {
+                return res.status(400).json({ error: 'SenderId and ReceiverId are required for new conversation check.' });
+            }
+
+            // Find if a conversation already exists between these two users
             const checkConversation = await Conversation.find({
-                members: { $all: [req.query.senderId, req.query.receiverId] }
+                Members: { $all: [senderId, receiverId] }
             });
 
             if (checkConversation.length > 0) {
-                return res.status(200).json({ conversationId: checkConversation[0]._id });
+                // If conversation exists, return its ID
+                return res.status(200).json({ conversationId: checkConversation[0]._id, message: 'Existing conversation found' });
             } else {
-                // If no conversation exists, create a new one or return a message
-                return res.status(200).json({ message: 'No conversation found' });
+                // If no conversation found, indicate that (client will then use /api/message POST to create it)
+                return res.status(200).json({ message: 'No conversation found for these members' });
             }
         } else {
-            // Handle existing conversation messages
+            // If a specific conversationId is provided, fetch messages for it
             const messages = await Messages.find({ ConversationId: conversationId });
 
             if (messages.length === 0) {
-                return res.status(200).json([]); // No messages
+                return res.status(200).json([]); // Return empty array if no messages
             }
 
-            // Fetch user data for each message
+            // Populate user details for each message
             const messageUserData = await Promise.all(
                 messages.map(async (message) => {
+                    // Mongoose's .populate() could be more efficient here, but manual lookup works too.
                     const user = await Users.findById(message.SenderId);
                     return user
                         ? {
-                              user: { id: user._id, fullName: user.fullName, email: user.email },
-                              message: message.Message,
-                          }
-                        : null;
+                            user: { id: user._id, fullName: user.fullName, email: user.email }, // Ensure consistent 'id'
+                            message: message.Message, // Use 'Message' as it's from the schema
+                            createdAt: message.createdAt // Include timestamp for sorting on client
+                        }
+                        : null; // Handle case where sender user might not be found
                 })
             );
 
-            // Filter out any null values if a user was not found
+            // Filter out any messages where the sender user couldn't be found
             const filteredData = messageUserData.filter(data => data !== null);
 
             return res.status(200).json(filteredData);
@@ -239,114 +304,150 @@ app.get('/api/message/:conversationId', async (req, res) => {
     }
 });
 
+// POST Route to Send and Save a Message (Crucial for Persistence)
+app.post('/api/message', async (req, res) => {
+    try {
+        console.log("Received message data for saving:", req.body);
+        const { conversationId, senderId, message, receiverId } = req.body; // receiverId is expected for 'new' conversations
 
+        // Basic validation
+        if (!senderId || !message) {
+            return res.status(400).json({ error: 'SenderId and Message are required.' });
+        }
 
-        // Corrected Backend Responses
-        app.post('/api/message', async (req, res) => {
-            try {
-                console.log(req.body);
-                const { conversationId, senderId, message, receiverId = "" } = req.body;
+        let actualConversationId = conversationId;
 
-                if (!senderId || !message)
-                    return res.status(400).json({ error: 'Please fill all the fields' });
+        // If conversationId is not provided (or explicitely 'new' from client payload design)
+        // and a receiverId is available, try to find or create a new conversation.
+        if (!actualConversationId && receiverId) {
+            // Check if conversation already exists between sender and receiver
+            let existingConversation = await Conversation.findOne({
+                Members: { $all: [senderId, receiverId] }
+            });
 
-                if (conversationId === 'new' && receiverId) {
-                    const NewConversation = new Conversation({
-                        Members: [senderId, receiverId]
-                    });
-                    await NewConversation.save();
-
-                    const newMessages = new Messages({
-                        ConversationId: NewConversation._id,
-                        SenderId: senderId,
-                        Message: message
-                    });
-                    await newMessages.save();
-                    return res.status(200).json({ message: 'Message sent successfully' });
-                }
-
-                if (!conversationId && !receiverId) {
-                    return res.status(400).json({ error: 'Please provide either conversationId or receiverId' });
-                }
-
-                const newMessages = new Messages({
-                    ConversationId: conversationId,
-                    SenderId: senderId,
-                    Message: message
+            if (!existingConversation) {
+                // If no existing conversation, create a new one
+                const NewConversation = new Conversation({
+                    Members: [senderId, receiverId]
                 });
-                await newMessages.save();
-                res.status(200).json({ message: 'Message sent successfully' });
-            } catch (error) {
-                console.error(error);
-                res.status(500).json({ error: 'An error occurred while sending the message' });
+                await NewConversation.save();
+                actualConversationId = NewConversation._id; // Set the new conversation ID
+                console.log('New conversation created for message:', actualConversationId);
+            } else {
+                actualConversationId = existingConversation._id; // Use existing conversation ID
+                console.log('Using existing conversation for message:', actualConversationId);
             }
+        } else if (!actualConversationId && !receiverId) {
+            // This case should ideally not happen if client sends conversationId or receiverId for 'new'
+            return res.status(400).json({ error: 'Please provide either conversationId or receiverId for message persistence.' });
+        }
+
+        // Create and save the new message
+        const newMessages = new Messages({
+            ConversationId: actualConversationId,
+            SenderId: senderId,
+            Message: message
+        });
+        await newMessages.save();
+        console.log('Message saved to DB:', newMessages._id);
+
+        // Respond with success and the conversationId (especially useful if a new one was created)
+        res.status(200).json({
+            message: 'Message sent and saved successfully',
+            conversationId: actualConversationId // Return the actual conversation ID used
         });
 
+    } catch (error) {
+        console.error('Error saving message:', error);
+        res.status(500).json({ error: 'An error occurred while saving the message.' });
+    }
+});
 
-
+// Get Conversations for a specific User
 app.get('/api/conversation/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
-        console.log(userId);
+        console.log('Fetching conversations for user ID:', userId);
 
-        const conversation = await Conversation.find({ Members: { $in: [userId] } });
+        // Find all conversations where the userId is a member
+        const conversations = await Conversation.find({ Members: { $in: [userId] } });
 
-        if (conversation.length === 0) {
-            return res.status(200).json({ message: 'No conversations found. Start a new chat!' });
+        if (conversations.length === 0) {
+            return res.status(200).json([]); // Return empty array if no conversations
         }
 
+        // For each conversation, get the details of the other member
         const conversationUserData = await Promise.all(
-            conversation.map(async (conversation) => {
-                // Find the other member in the conversation
-                const receiverId = conversation.Members.find((member) => member !== userId) || userId;
+            conversations.map(async (conv) => {
+                // Find the ID of the other member in the conversation (not the current user)
+                const receiverId = conv.Members.find((member) => member.toString() !== userId); // Use toString() for comparison
 
-                if (!mongoose.Types.ObjectId.isValid(receiverId)) {
-                    console.error(`Receiver ID not found for conversation ${conversation._id}`);
-                    return { error: `Receiver ID not found`, conversationId: conversation._id.toString() };
+                if (!receiverId) {
+                    console.error(`Receiver ID not found in conversation ${conv._id}`);
+                    return null; // Skip this conversation if other member ID is missing
                 }
 
+                // Ensure receiverId is a valid ObjectId before querying
+                if (!mongoose.Types.ObjectId.isValid(receiverId)) {
+                    console.error(`Invalid receiver ID for conversation ${conv._id}: ${receiverId}`);
+                    return null;
+                }
+
+                // Find the user details of the other member
                 const user = await Users.findById(new mongoose.Types.ObjectId(receiverId));
 
                 if (!user) {
-                    console.error(`User with ID ${receiverId} not found`);
-                    return { error: `User with ID ${receiverId} not found`, conversationId: conversation._id.toString() };
+                    console.error(`User with ID ${receiverId} not found for conversation ${conv._id}`);
+                    return null; // Skip if user details not found
                 }
 
+                // You might also want to fetch the last message here and pass it
+                // For simplicity, we're not fetching last message/unread count in this specific endpoint
+                // but client side can update unreadCount on its own from socket.on('getMessage')
                 return {
                     user: {
-                        receiverId: user._id.toString(),
+                        receiverId: user._id.toString(), // Consistent receiverId
                         fullName: user.fullName,
                         email: user.email,
-                        isSender: receiverId === userId
+                        // Add other user details if needed, e.g., profile picture
                     },
-                    conversationId: conversation._id.toString()
+                    conversationId: conv._id.toString(), // Consistent conversationId
+                    // You can add unreadCount here if your Conversation model supports it
                 };
             })
         );
 
-        res.status(200).json(conversationUserData);
+        // Filter out any null entries (conversations where receiver details couldn't be fetched)
+        const filteredConversations = conversationUserData.filter(data => data !== null);
+
+        res.status(200).json(filteredConversations);
     } catch (error) {
-        console.error('Error fetching conversation:', error);
+        console.error('Error fetching conversation list:', error);
         res.status(500).json({ message: 'An error occurred while fetching conversations.' });
     }
 });
 
-
-
+// Get All Users (for starting new chats)
 app.get('/api/users', async (req, res) => {
     try {
         const users = await Users.find();
-        const usersData = Promise.all(users.map(async (user) => {
-            return { users: { fullName: user.fullName, email: user.email, receiverId: user._id }, }
-        }))
-        res.status(200).json(await usersData);
+        // Map to desired response format, including a consistent 'id' for the client
+        const usersData = users.map((user) => {
+            return {
+                id: user._id.toString(), // Use user._id as 'id' for client
+                fullName: user.fullName,
+                email: user.email,
+                // receiverId: user._id // Could also pass as receiverId for clarity if client prefers
+            };
+        });
+        res.status(200).json(usersData);
     } catch (error) {
-
-        console.log('error', error);
-
+        console.error('Error fetching all users:', error);
+        res.status(500).json({ error: 'Failed to fetch users' });
     }
-})
+});
 
+// Get a single conversation by senderId and receiverId (used by client for 'new' chat check)
 app.get('/api/conversation', async (req, res) => {
     const { senderId, receiverId } = req.query;
     try {
@@ -355,17 +456,20 @@ app.get('/api/conversation', async (req, res) => {
         });
 
         if (conversation) {
+            // If conversation exists, return its ID
             return res.status(200).json({ conversationId: conversation._id });
         } else {
+            // If no conversation found, inform the client. Client will then create via POST /api/message.
             return res.status(404).json({ message: 'No conversation found' });
         }
     } catch (error) {
-        console.error('Error fetching conversation:', error);
+        console.error('Error fetching specific conversation:', error);
         res.status(500).json({ error: 'Internal Server Error' });
     }
 });
 
-app.listen(port, () => {
-    console.log(`server started on  ${port}`);
 
+// Start the Express HTTP server
+app.listen(port, () => {
+    console.log(`Server started on ${port}`);
 });
