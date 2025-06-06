@@ -12,7 +12,7 @@ const app = express();
 // It's listening on port 8080 and allowing CORS from your client (http://localhost:3000)
 const io = require('socket.io')(8080, {
     cors: {
-        origin: 'http://localhost:3000'
+        origin: 'https://chat-app-brown-xi-79.vercel.app'
     }
 });
 
