@@ -1,4 +1,5 @@
 // Importing required modules
+require('dotenv').config(); // Load .env variables
 const express = require('express');
 const bcryptjs = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -12,7 +13,7 @@ const app = express();
 // It's listening on port 8080 and allowing CORS from your client (http://localhost:3000)
 const io = require('socket.io')(8080, {
     cors: {
-        origin: 'https://chat-app-brown-xi-79.vercel.app'
+        origin: 'process.env.FRONTEND_URL'
     }
 });
 
