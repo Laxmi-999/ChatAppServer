@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 
 async function main() {
     try {
-      await mongoose.connect('mongodb://localhost:27017/ChatApp');
+      await mongoose.connect('mongodb://localhost:27017/ChatApp', );
       console.log('Database connected');
     } 
     catch (error) {
