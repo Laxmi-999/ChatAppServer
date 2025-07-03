@@ -99,6 +99,7 @@ app.get('/', (req, res) => {
     res.send('Welcome to the Chat App Server!');
 });
 
+
 // User Registration Route
 app.post('/api/register', async (req, res) => {
     try {
@@ -112,12 +113,13 @@ app.post('/api/register', async (req, res) => {
 
         // Check if user already exists
         const isAlreadyExits = await Users.findOne({ email });
-        if (isAlreadyExAlreadyExits) { // Corrected typo
+        if (isAlreadyExAlreadyExits) { // <--- TYPO HERE: isAlreadyExAlreadyExits should be isAlreadyExits
             return res.status(400).send('User already exist');
         }
 
         // Create new user and hash password
         const newUser = new Users({ fullName, email });
+        // --- Potential issue: bcryptjs.hash is asynchronous and callback-based ---
         bcryptjs.hash(password, 10, async (err, hashedPassword) => {
             if (err) {
                 console.error("Error hashing password:", err);
@@ -134,6 +136,7 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
+
 // User Login Route
 app.post('/api/login', async (req, res) => {
     try {
@@ -146,14 +149,15 @@ app.post('/api/login', async (req, res) => {
         }
 
         // Find user by email
-        const User = await Users.findOne({ email });
+        // --- Potential issue: password field is not selected by default ---
+        const User = await Users.findOne({ email }); // You need to explicitly select the password here
         if (!User) {
             console.log("User not found for email:", email);
-            return res.status(400).send('User not found!');
+            return res.status(400).send('User not found!'); // Frontend expects 'Invalid credentials'
         }
 
         // Validate password
-        const ValidateUser = await bcryptjs.compare(password, User.password);
+        const ValidateUser = await bcryptjs.compare(password, User.password); // User.password might be undefined
         if (!ValidateUser) {
             return res.status(400).send('Incorrect email or password');
         }
@@ -163,16 +167,16 @@ app.post('/api/login', async (req, res) => {
             userId: User._id,
             userEmail: User.email
         };
-        // Use environment variable for JWT secret key, with a fallback
-        const JWT_SECRETE_KEY = process.env.JWT_SECRETE_KEY || 'THIS_IS_A_VERY_STRONG_DEFAULT_JWT_SECRETE_KEY'; // Changed default key for better security
+        const JWT_SECRETE_KEY = process.env.JWT_SECRETE_KEY || 'THIS_IS_A_VERY_STRONG_DEFAULT_JWT_SECRETE_KEY';
 
-        jwt.sign(payload, JWT_SECRETE_KEY, { expiresIn: '1d' }, async (err, token) => { // '1d' for 1 day expiration
+        jwt.sign(payload, JWT_SECRETE_KEY, { expiresIn: '1d' }, async (err, token) => {
             if (err) {
                 console.error("JWT sign error:", err);
                 return res.status(500).json({ error: 'Failed to generate token.' });
             }
 
             // Update user's token in the database
+            // --- Remove this if you follow token field recommendation ---
             await Users.updateOne({ _id: User._id }, {
                 $set: { token: token }
             });
@@ -450,7 +454,7 @@ app.get('/api/conversation', async (req, res) => {
 });
 
 
-// *** CRITICAL CHANGE HERE ***
+// *** CRITICALus CHANGE HERE ***
 // Start the shared HTTP server, which both Express and Socket.IO use
 server.listen(port, () => {
     console.log(`Server (Express and Socket.IO) started on port ${port}`);
