@@ -13,8 +13,9 @@ const app = express();
 // It's listening on port 8080 and allowing CORS from your client (http://localhost:3000)
 const io = require('socket.io')(8080, {
     cors: {
-        origin: 'process.env.FRONTEND_URL'
-    }
+    origin: process.env.FRONTEND_URL, // ← no quotes!
+    methods: ['GET', 'POST']
+}
 });
 
 // Connecting to MongoDB Database
