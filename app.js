@@ -7,7 +7,6 @@ const util = require('util'); // For promisifying jwt.sign
 const cors = require('cors');
 const mongoose = require('mongoose');
 const { Server } = require('socket.io');
-const Users = require('./models/User');
 
 const app = express();
 const server = http.createServer(app);
