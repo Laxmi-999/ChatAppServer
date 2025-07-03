@@ -32,7 +32,7 @@ const io = new Server(server, {
 require('./db/connection'); // Keep this if your connection logic is in this file
 
 // Import Models
-const Users = require('./models/User'); // Corrected path to 'User' singular as per common practice
+const Users = require('./models/Users'); // Corrected path to 'User' singular as per common practice
 const Conversation = require('./models/Conversation');
 const Messages = require('./models/Messages');
 
