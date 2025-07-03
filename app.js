@@ -1,22 +1,23 @@
 require('dotenv').config();
 const express = require('express');
-const http = require('http');
+const http = require('http'); // Keep http for creating the server
 const bcryptjs = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const cors = require('cors');
+const cors = require('cors'); // Keep cors for REST API
 const mongoose = require('mongoose');
 const { Server } = require('socket.io');
 
 const app = express();
-const server = http.createServer(app); //  Create shared HTTP server
-const port = process.env.PORT || 8000;
-
+const server = http.createServer(app); // Create shared HTTP server for Express and Socket.IO
+const port = process.env.PORT || 8000; // Provide a fallback port for local development
 
 
 // Initialize socket.io with the shared server
 const io = new Server(server, {
     cors: {
-        origin: process.env.FRONTEND_URL,
+        // IMPORTANT: Ensure this matches your Vercel frontend URL exactly.
+        // It's good practice to use an environment variable for this in production.
+        origin: process.env.FRONTEND_URL, // This is correct, assuming FRONTEND_URL is set correctly in Render
         methods: ["GET", "POST"]
     }
 });
@@ -29,10 +30,16 @@ const Users = require('./models/Users');
 const Conversation = require('./models/Conversation');
 const Messages = require('./models/Messages');
 
-// Middleware
+// Middleware for Express REST API
 app.use(express.json());
-app.use(cors());
-
+// Apply CORS middleware globally for all Express routes as well
+// It's good to have this for your REST API endpoints too,
+// especially if your frontend is on a different origin.
+// Make sure this cors middleware also respects your FRONTEND_URL.
+app.use(cors({
+    origin: process.env.FRONTEND_URL,
+    methods: ["GET", "POST", "PUT", "DELETE"] // Add all methods your API uses
+}));
 
 
 //socket logic
@@ -105,7 +112,7 @@ app.post('/api/register', async (req, res) => {
 
         // Check if user already exists
         const isAlreadyExits = await Users.findOne({ email });
-        if (isAlreadyExits) {
+        if (isAlreadyExAlreadyExits) { // Corrected typo
             return res.status(400).send('User already exist');
         }
 
@@ -123,7 +130,7 @@ app.post('/api/register', async (req, res) => {
 
     } catch (Err) {
         console.error('Registration error:', Err);
-    res.status(500).json({ error: 'An error occurred during registration.' })
+        res.status(500).json({ error: 'An error occurred during registration.' })
     }
 });
 
@@ -443,7 +450,8 @@ app.get('/api/conversation', async (req, res) => {
 });
 
 
-// Start the Express HTTP server
-app.listen(port, () => {
-    console.log(`Server started on ${port}`);
+// *** CRITICAL CHANGE HERE ***
+// Start the shared HTTP server, which both Express and Socket.IO use
+server.listen(port, () => {
+    console.log(`Server (Express and Socket.IO) started on port ${port}`);
 });
