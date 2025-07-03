@@ -1,61 +1,62 @@
 require('dotenv').config();
 const express = require('express');
-const http = require('http'); // Keep http for creating the server
+const http = require('http');
 const bcryptjs = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const cors = require('cors'); // Keep cors for REST API
+const util = require('util'); // For promisifying jwt.sign
+const cors = require('cors');
 const mongoose = require('mongoose');
 const { Server } = require('socket.io');
 
 const app = express();
-const server = http.createServer(app); // Create shared HTTP server for Express and Socket.IO
-const port = process.env.PORT || 8000; // Provide a fallback port for local development
+const server = http.createServer(app);
+const port = process.env.PORT || 8000;
 
+// Promisify jwt.sign for async/await usage
+const jwtSignPromise = util.promisify(jwt.sign);
 
-// Initialize socket.io with the shared server
+// Initialize Socket.IO
 const io = new Server(server, {
     cors: {
-        // IMPORTANT: Ensure this matches your Vercel frontend URL exactly.
-        // It's good practice to use an environment variable for this in production.
-        origin: process.env.FRONTEND_URL, // This is correct, assuming FRONTEND_URL is set correctly in Render
+        origin: process.env.FRONTEND_URL,
         methods: ["GET", "POST"]
     }
 });
 
 // Connect to MongoDB
-require('./db/connection');
+// Assuming './db/connection' sets up the mongoose connection
+// Example if it were inline:
+// mongoose.connect(process.env.MONGO_URI)
+//     .then(() => console.log('MongoDB Connected Successfully!'))
+//     .catch(err => console.error('MongoDB connection error:', err));
+require('./db/connection'); // Keep this if your connection logic is in this file
 
 // Import Models
-const Users = require('./models/Users');
+const Users = require('./models/User'); // Corrected path to 'User' singular as per common practice
 const Conversation = require('./models/Conversation');
 const Messages = require('./models/Messages');
 
 // Middleware for Express REST API
-app.use(express.json());
-// Apply CORS middleware globally for all Express routes as well
-// It's good to have this for your REST API endpoints too,
-// especially if your frontend is on a different origin.
-// Make sure this cors middleware also respects your FRONTEND_URL.
-app.use(cors({
+app.use(express.json()); // For parsing application/json bodies
+app.use(cors({ // Apply CORS middleware for all Express routes
     origin: process.env.FRONTEND_URL,
-    methods: ["GET", "POST", "PUT", "DELETE"] // Add all methods your API uses
+    methods: ["GET", "POST", "PUT", "DELETE"]
 }));
 
 
-//socket logic
+// --- Socket.IO Logic ---
 let users = [];
 
 io.on('connection', (socket) => {
     console.log('A user connected:', socket.id);
 
     socket.on('addUser', userId => {
-        if (!users.some(user => user.userId === userId)) {
-            users.push({ userId, socketId: socket.id });
+        // Update user's socketId if already exists, otherwise add new user
+        const existingUserIndex = users.findIndex(user => user.userId === userId);
+        if (existingUserIndex !== -1) {
+            users[existingUserIndex].socketId = socket.id;
         } else {
-            const existingUserIndex = users.findIndex(user => user.userId === userId);
-            if (existingUserIndex !== -1) {
-                users[existingUserIndex].socketId = socket.id;
-            }
+            users.push({ userId, socketId: socket.id });
         }
         io.emit('getUsers', users);
         console.log('Users online:', users);
@@ -78,8 +79,11 @@ io.on('connection', (socket) => {
             io.to(receiverSocketInfo.socketId).emit('getMessage', messageData);
         }
 
-        if (senderSocketInfo) {
-            io.to(senderSocketInfo.socketId).emit('getMessage', messageData);
+        // We only emit back to the sender if they are not the one who initiated the optimistic update
+        // (This is primarily handled on the client-side now, but keeping server echo can be useful for debugging
+        // or if client-side optimistic update is not present)
+        if (senderSocketInfo && senderId !== receiverId) { // Avoid sending back to self unless it's a self-chat
+             io.to(senderSocketInfo.socketId).emit('getMessage', messageData);
         }
     });
 
@@ -87,112 +91,78 @@ io.on('connection', (socket) => {
         console.log('A user disconnected:', socket.id);
         users = users.filter(user => user.socketId !== socket.id);
         io.emit('getUsers', users);
+        console.log('Remaining online users:', users);
     });
 });
 
-// =====================================
-// REST API Routes
-// =====================================
+// --- REST API Routes ---
 
-// Basic welcome route for the server
+// Basic welcome route
 app.get('/', (req, res) => {
-    res.send('Welcome to the Chat App Server!');
+    res.status(200).send('Welcome to the Chat App Server!');
 });
-
 
 // User Registration Route
 app.post('/api/register', async (req, res) => {
     try {
-        console.log('Register request body:', req.body);
         const { fullName, email, password } = req.body;
 
-        // Validate required fields
         if (!fullName || !email || !password) {
-            return res.status(400).send('Please fill all the fields');
+            return res.status(400).json({ error: 'Please fill all fields.' });
         }
 
-        // Check if user already exists
-        const isAlreadyExits = await Users.findOne({ email });
-        if (isAlreadyExAlreadyExits) { // <--- TYPO HERE: isAlreadyExAlreadyExits should be isAlreadyExits
-            return res.status(400).send('User already exist');
+        const existingUser = await Users.findOne({ email });
+        if (existingUser) {
+            return res.status(400).json({ error: 'User already exists with this email.' });
         }
 
-        // Create new user and hash password
-        const newUser = new Users({ fullName, email });
-        // --- Potential issue: bcryptjs.hash is asynchronous and callback-based ---
-        bcryptjs.hash(password, 10, async (err, hashedPassword) => {
-            if (err) {
-                console.error("Error hashing password:", err);
-                return res.status(500).json({ error: 'Failed to register user.' });
-            }
-            newUser.set('password', hashedPassword);
-            await newUser.save(); // Save the new user to DB
-            return res.status(200).send('User registered successfully');
-        });
+        const hashedPassword = await bcryptjs.hash(password, 10); // Hash password
 
-    } catch (Err) {
-        console.error('Registration error:', Err);
-        res.status(500).json({ error: 'An error occurred during registration.' })
+        const newUser = new Users({ fullName, email, password: hashedPassword });
+        await newUser.save();
+
+        res.status(201).json({ message: 'User registered successfully!' }); // 201 Created for new resource
+
+    } catch (error) {
+        console.error('Registration error:', error);
+        res.status(500).json({ error: 'An error occurred during registration.' });
     }
 });
-
 
 // User Login Route
 app.post('/api/login', async (req, res) => {
     try {
         const { email, password } = req.body;
-        console.log('Login request body:', req.body);
 
-        // Validate required fields
         if (!email || !password) {
-            return res.status(400).send('Please fill all the fields');
+            return res.status(400).json({ error: 'Please fill all fields.' });
         }
 
-        // Find user by email
-        // --- Potential issue: password field is not selected by default ---
-        const User = await Users.findOne({ email }); // You need to explicitly select the password here
-        if (!User) {
-            console.log("User not found for email:", email);
-            return res.status(400).send('User not found!'); // Frontend expects 'Invalid credentials'
+        const user = await Users.findOne({ email }).select('+password'); // Select password explicitly
+        if (!user) {
+            return res.status(400).json({ error: 'Invalid credentials.' }); // Generic message for security
         }
 
-        // Validate password
-        const ValidateUser = await bcryptjs.compare(password, User.password); // User.password might be undefined
-        if (!ValidateUser) {
-            return res.status(400).send('Incorrect email or password');
+        const isPasswordValid = await bcryptjs.compare(password, user.password);
+        if (!isPasswordValid) {
+            return res.status(400).json({ error: 'Invalid credentials.' });
         }
 
-        // Generate JWT token
         const payload = {
-            userId: User._id,
-            userEmail: User.email
+            userId: user._id,
+            userEmail: user.email
         };
-        const JWT_SECRETE_KEY = process.env.JWT_SECRETE_KEY || 'THIS_IS_A_VERY_STRONG_DEFAULT_JWT_SECRETE_KEY';
 
-        jwt.sign(payload, JWT_SECRETE_KEY, { expiresIn: '1d' }, async (err, token) => {
-            if (err) {
-                console.error("JWT sign error:", err);
-                return res.status(500).json({ error: 'Failed to generate token.' });
-            }
+        const JWT_SECRETE_KEY = process.env.JWT_SECRETE_KEY || 'A_VERY_STRONG_DEFAULT_JWT_SECRET_KEY_PLEASE_CHANGE_ME';
+        const token = await jwtSignPromise(payload, JWT_SECRETE_KEY, { expiresIn: '1d' });
 
-            // Update user's token in the database
-            // --- Remove this if you follow token field recommendation ---
-            await Users.updateOne({ _id: User._id }, {
-                $set: { token: token }
-            });
-
-            console.log('User logged in successfully');
-            console.log(`Logged in user details: ID - ${User._id}, Email - ${User.email}, Full Name - ${User.fullName}`);
-
-            // Respond with user details and token
-            return res.status(200).json({
-                User: {
-                    id: User._id, // Use 'id' for consistency with client if preferred
-                    email: User.email,
-                    fullName: User.fullName
-                },
-                token: token
-            });
+        res.status(200).json({
+            User: {
+                id: user._id,
+                email: user.email,
+                fullName: user.fullName
+            },
+            token: token
         });
 
     } catch (error) {
@@ -201,12 +171,11 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// Create Conversation Route (Note: This is mostly for initial conversation creation,
-// the /api/message POST route also handles 'new' conversation creation if needed)
+// Create Conversation Route
 app.post('/api/conversation', async (req, res) => {
     try {
         const { senderId, receiverId } = req.body;
-        // Check if a conversation already exists between these members to avoid duplicates
+
         const existingConversation = await Conversation.findOne({
             Members: { $all: [senderId, receiverId] }
         });
@@ -220,7 +189,7 @@ app.post('/api/conversation', async (req, res) => {
 
         const conversation = new Conversation({ Members: [senderId, receiverId] });
         await conversation.save();
-        res.status(200).json({
+        res.status(201).json({
             message: "Conversation created successfully",
             conversationId: conversation._id
         });
@@ -233,54 +202,44 @@ app.post('/api/conversation', async (req, res) => {
 // Get Messages for a specific Conversation ID or check for existing conversation
 app.get('/api/message/:conversationId', async (req, res) => {
     try {
-        const conversationId = req.params.conversationId;
+        const { conversationId } = req.params;
 
-        // If the client requests 'new', it means they are checking for an existing conversation
-        // or preparing to start a new one with a specific sender/receiver pair.
-        if (conversationId === 'new') {
+        if (conversationId === 'new') { // Handles client request to check for new conversation
             const { senderId, receiverId } = req.query;
             if (!senderId || !receiverId) {
                 return res.status(400).json({ error: 'SenderId and ReceiverId are required for new conversation check.' });
             }
 
-            // Find if a conversation already exists between these two users
-            const checkConversation = await Conversation.find({
+            const checkConversation = await Conversation.findOne({
                 Members: { $all: [senderId, receiverId] }
             });
 
-            if (checkConversation.length > 0) {
-                // If conversation exists, return its ID
-                return res.status(200).json({ conversationId: checkConversation[0]._id, message: 'Existing conversation found' });
+            if (checkConversation) {
+                return res.status(200).json({ conversationId: checkConversation._id, message: 'Existing conversation found' });
             } else {
-                // If no conversation found, indicate that (client will then use /api/message POST to create it)
                 return res.status(200).json({ message: 'No conversation found for these members' });
             }
-        } else {
-            // If a specific conversationId is provided, fetch messages for it
+        } else { // Fetches messages for an existing conversationId
             const messages = await Messages.find({ ConversationId: conversationId });
 
             if (messages.length === 0) {
-                return res.status(200).json([]); // Return empty array if no messages
+                return res.status(200).json([]);
             }
 
-            // Populate user details for each message
             const messageUserData = await Promise.all(
                 messages.map(async (message) => {
-                    // Mongoose's .populate() could be more efficient here, but manual lookup works too.
                     const user = await Users.findById(message.SenderId);
                     return user
                         ? {
-                            user: { id: user._id, fullName: user.fullName, email: user.email }, // Ensure consistent 'id'
-                            message: message.Message, // Use 'Message' as it's from the schema
-                            createdAt: message.createdAt // Include timestamp for sorting on client
+                            user: { id: user._id.toString(), fullName: user.fullName, email: user.email },
+                            message: message.Message,
+                            createdAt: message.createdAt
                         }
-                        : null; // Handle case where sender user might not be found
+                        : null;
                 })
             );
 
-            // Filter out any messages where the sender user couldn't be found
             const filteredData = messageUserData.filter(data => data !== null);
-
             return res.status(200).json(filteredData);
         }
     } catch (error) {
@@ -292,54 +251,42 @@ app.get('/api/message/:conversationId', async (req, res) => {
 // POST Route to Send and Save a Message (Crucial for Persistence)
 app.post('/api/message', async (req, res) => {
     try {
-        console.log("Received message data for saving:", req.body);
-        const { conversationId, senderId, message, receiverId } = req.body; // receiverId is expected for 'new' conversations
+        const { conversationId, senderId, message, receiverId } = req.body;
 
-        // Basic validation
         if (!senderId || !message) {
             return res.status(400).json({ error: 'SenderId and Message are required.' });
         }
 
         let actualConversationId = conversationId;
 
-        // If conversationId is not provided (or explicitely 'new' from client payload design)
-        // and a receiverId is available, try to find or create a new conversation.
         if (!actualConversationId && receiverId) {
-            // Check if conversation already exists between sender and receiver
             let existingConversation = await Conversation.findOne({
                 Members: { $all: [senderId, receiverId] }
             });
 
             if (!existingConversation) {
-                // If no existing conversation, create a new one
-                const NewConversation = new Conversation({
+                const newConversation = new Conversation({
                     Members: [senderId, receiverId]
                 });
-                await NewConversation.save();
-                actualConversationId = NewConversation._id; // Set the new conversation ID
-                console.log('New conversation created for message:', actualConversationId);
+                await newConversation.save();
+                actualConversationId = newConversation._id;
             } else {
-                actualConversationId = existingConversation._id; // Use existing conversation ID
-                console.log('Using existing conversation for message:', actualConversationId);
+                actualConversationId = existingConversation._id;
             }
         } else if (!actualConversationId && !receiverId) {
-            // This case should ideally not happen if client sends conversationId or receiverId for 'new'
             return res.status(400).json({ error: 'Please provide either conversationId or receiverId for message persistence.' });
         }
 
-        // Create and save the new message
         const newMessages = new Messages({
             ConversationId: actualConversationId,
             SenderId: senderId,
             Message: message
         });
         await newMessages.save();
-        console.log('Message saved to DB:', newMessages._id);
 
-        // Respond with success and the conversationId (especially useful if a new one was created)
         res.status(200).json({
             message: 'Message sent and saved successfully',
-            conversationId: actualConversationId // Return the actual conversation ID used
+            conversationId: actualConversationId
         });
 
     } catch (error) {
@@ -351,60 +298,42 @@ app.post('/api/message', async (req, res) => {
 // Get Conversations for a specific User
 app.get('/api/conversation/:userId', async (req, res) => {
     try {
-        const userId = req.params.userId;
-        console.log('Fetching conversations for user ID:', userId);
+        const { userId } = req.params;
 
-        // Find all conversations where the userId is a member
         const conversations = await Conversation.find({ Members: { $in: [userId] } });
 
         if (conversations.length === 0) {
-            return res.status(200).json([]); // Return empty array if no conversations
+            return res.status(200).json([]);
         }
 
-        // For each conversation, get the details of the other member
         const conversationUserData = await Promise.all(
             conversations.map(async (conv) => {
-                // Find the ID of the other member in the conversation (not the current user)
-                const receiverId = conv.Members.find((member) => member.toString() !== userId); // Use toString() for comparison
+                const receiverId = conv.Members.find((member) => member.toString() !== userId);
 
-                if (!receiverId) {
-                    console.error(`Receiver ID not found in conversation ${conv._id}`);
-                    return null; // Skip this conversation if other member ID is missing
-                }
-
-                // Ensure receiverId is a valid ObjectId before querying
-                if (!mongoose.Types.ObjectId.isValid(receiverId)) {
-                    console.error(`Invalid receiver ID for conversation ${conv._id}: ${receiverId}`);
+                if (!receiverId || !mongoose.Types.ObjectId.isValid(receiverId)) {
+                    console.warn(`Invalid or missing receiver ID for conversation ${conv._id}`);
                     return null;
                 }
 
-                // Find the user details of the other member
-                const user = await Users.findById(new mongoose.Types.ObjectId(receiverId));
+                const user = await Users.findById(receiverId); // Mongoose handles ObjectId conversion here implicitly
 
                 if (!user) {
-                    console.error(`User with ID ${receiverId} not found for conversation ${conv._id}`);
-                    return null; // Skip if user details not found
+                    console.warn(`User with ID ${receiverId} not found for conversation ${conv._id}`);
+                    return null;
                 }
 
-                // You might also want to fetch the last message here and pass it
-                // For simplicity, we're not fetching last message/unread count in this specific endpoint
-                // but client side can update unreadCount on its own from socket.on('getMessage')
                 return {
                     user: {
-                        receiverId: user._id.toString(), // Consistent receiverId
+                        receiverId: user._id.toString(),
                         fullName: user.fullName,
                         email: user.email,
-                        // Add other user details if needed, e.g., profile picture
                     },
-                    conversationId: conv._id.toString(), // Consistent conversationId
-                    // You can add unreadCount here if your Conversation model supports it
+                    conversationId: conv._id.toString(),
                 };
             })
         );
 
-        // Filter out any null entries (conversations where receiver details couldn't be fetched)
         const filteredConversations = conversationUserData.filter(data => data !== null);
-
         res.status(200).json(filteredConversations);
     } catch (error) {
         console.error('Error fetching conversation list:', error);
@@ -412,19 +341,15 @@ app.get('/api/conversation/:userId', async (req, res) => {
     }
 });
 
-// Get All Users (for starting new chats)
+// Get All Users
 app.get('/api/users', async (req, res) => {
     try {
         const users = await Users.find();
-        // Map to desired response format, including a consistent 'id' for the client
-        const usersData = users.map((user) => {
-            return {
-                id: user._id.toString(), // Use user._id as 'id' for client
-                fullName: user.fullName,
-                email: user.email,
-                // receiverId: user._id // Could also pass as receiverId for clarity if client prefers
-            };
-        });
+        const usersData = users.map((user) => ({
+            id: user._1id.toString(),
+            fullName: user.fullName,
+            email: user.email,
+        }));
         res.status(200).json(usersData);
     } catch (error) {
         console.error('Error fetching all users:', error);
@@ -432,8 +357,8 @@ app.get('/api/users', async (req, res) => {
     }
 });
 
-// Get a single conversation by senderId and receiverId (used by client for 'new' chat check)
-app.get('/api/conversation', async (req, res) => {
+// Get a single conversation by senderId and receiverId
+app.get('/api/conversation/check', async (req, res) => { // Changed path to avoid conflict with /:userId
     const { senderId, receiverId } = req.query;
     try {
         const conversation = await Conversation.findOne({
@@ -441,10 +366,8 @@ app.get('/api/conversation', async (req, res) => {
         });
 
         if (conversation) {
-            // If conversation exists, return its ID
             return res.status(200).json({ conversationId: conversation._id });
         } else {
-            // If no conversation found, inform the client. Client will then create via POST /api/message.
             return res.status(404).json({ message: 'No conversation found' });
         }
     } catch (error) {
@@ -453,9 +376,7 @@ app.get('/api/conversation', async (req, res) => {
     }
 });
 
-
-// *** CRITICALus CHANGE HERE ***
-// Start the shared HTTP server, which both Express and Socket.IO use
+// Start the shared HTTP server
 server.listen(port, () => {
     console.log(`Server (Express and Socket.IO) started on port ${port}`);
 });
