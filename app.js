@@ -1,113 +1,85 @@
-// Importing required modules
-require('dotenv').config(); // Load .env variables
+require('dotenv').config();
 const express = require('express');
+const http = require('http');
 const bcryptjs = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
-const mongoose = require('mongoose'); // Mongoose is already imported, moved here for consistency with other imports
+const mongoose = require('mongoose');
+const { Server } = require('socket.io');
 
-// Initialize Express app
 const app = express();
+const server = http.createServer(app); //  Create shared HTTP server
+const port = process.env.PORT || 8000;
 
-// Initialize Socket.io server
-// It's listening on port 8080 and allowing CORS from your client (http://localhost:3000)
-const io = require('socket.io')(8080, {
+
+
+// Initialize socket.io with the shared server
+const io = new Server(server, {
     cors: {
-    origin: process.env.FRONTEND_URL, // ← no quotes!
-    methods: ['GET', 'POST']
-}
+        origin: process.env.FRONTEND_URL,
+        methods: ["GET", "POST"]
+    }
 });
 
-// Connecting to MongoDB Database
-// Ensure your db/connection.js file properly connects to your MongoDB instance
+// Connect to MongoDB
 require('./db/connection');
 
-// Importing Mongoose Models
+// Import Models
 const Users = require('./models/Users');
 const Conversation = require('./models/Conversation');
 const Messages = require('./models/Messages');
 
-// Express App Middleware
-app.use(express.json()); // Enable Express to parse JSON request bodies
-app.use(cors());         // Enable CORS for all routes
+// Middleware
+app.use(express.json());
+app.use(cors());
 
-// Define the port for the Express HTTP server
-const port = 8000;
 
-// =====================================
-// Socket.io Logic
-// =====================================
-// 'users' array to keep track of currently connected users and their socket IDs
+
+//socket logic
 let users = [];
 
-// Socket.io connection event handler
-io.on('connection', socket => {
+io.on('connection', (socket) => {
     console.log('A user connected:', socket.id);
 
-    // Handler for 'addUser' event: Adds a user to the online users list
-    // This event is emitted by the client after login/initial connection
     socket.on('addUser', userId => {
-        // Check if the user is already in the 'users' array
         if (!users.some(user => user.userId === userId)) {
-            // If not present, add new user with their userId and current socketId
             users.push({ userId, socketId: socket.id });
         } else {
-            // If user already exists, update their socketId (e.g., if they reconnected or have multiple tabs)
             const existingUserIndex = users.findIndex(user => user.userId === userId);
             if (existingUserIndex !== -1) {
                 users[existingUserIndex].socketId = socket.id;
             }
         }
-        // Emit the updated list of online users to all connected clients
         io.emit('getUsers', users);
         console.log('Users online:', users);
     });
 
-    // Handler for 'sendMessage' event: Broadcasts a message to sender and receiver in real-time
-    // NOTE: This handler is *not* responsible for saving the message to the DB.
-    // The client should first send the message to the REST API for persistence.
     socket.on('sendMessage', async ({ senderId, receiverId, message, conversationId, user }) => {
-        // Find the receiver's socket information
         const receiverSocketInfo = users.find(onlineUser => onlineUser.userId === receiverId);
-        // Find the sender's socket information
         const senderSocketInfo = users.find(onlineUser => onlineUser.userId === senderId);
 
-        // Construct the message data to be sent via sockets
         const messageData = {
             senderId,
             receiverId,
             conversationId,
             message,
-            user: user || null, // Include user details passed from client
-            createdAt: new Date().toISOString() // Add timestamp for client-side sorting/keys
+            user: user || null,
+            createdAt: new Date().toISOString()
         };
 
-        // Emit message to the receiver if they are online
         if (receiverSocketInfo) {
-            console.log(`Emitting message to receiver: ${receiverId} at socket: ${receiverSocketInfo.socketId}`);
             io.to(receiverSocketInfo.socketId).emit('getMessage', messageData);
-        } else {
-            console.log(`Receiver ${receiverId} is offline. Message is saved to DB via API, but not sent via socket in real-time.`);
         }
 
-        // Emit message back to the sender (optional, but common for immediate feedback)
-        // This ensures the sender's UI updates even if they are talking to themselves or if only one tab is open.
         if (senderSocketInfo) {
-            console.log(`Emitting message to sender: ${senderId} at socket: ${senderSocketInfo.socketId}`);
             io.to(senderSocketInfo.socketId).emit('getMessage', messageData);
-        } else {
-            console.error(`Sender ${senderId} not found in active users during sendMessage emission.`);
         }
     });
 
-    // Handler for 'disconnect' event: Removes a user from the online users list when they disconnect
     socket.on('disconnect', () => {
         console.log('A user disconnected:', socket.id);
-        // Filter out the disconnected user from the 'users' array
         users = users.filter(user => user.socketId !== socket.id);
-        // Emit the updated list of online users to all connected clients
         io.emit('getUsers', users);
-        console.log('Users online after disconnect:', users);
     });
 });
 
