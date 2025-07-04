@@ -358,7 +358,7 @@ app.get('/api/users', async (req, res) => {
 });
 
 // Get a single conversation by senderId and receiverId
-app.get('/api/conversation/check', async (req, res) => { // Changed path to avoid conflict with /:userId
+app.get('/api/conversation', async (req, res) => { // Notice no '/check'
     const { senderId, receiverId } = req.query;
     try {
         const conversation = await Conversation.findOne({
