@@ -23,23 +23,23 @@ const io = new Server(server, {
     }
 });
 
-// Connect to MongoDB
-// Assuming './db/connection' sets up the mongoose connection
-// Example if it were inline:
-// mongoose.connect(process.env.MONGO_URI)
-//     .then(() => console.log('MongoDB Connected Successfully!'))
-//     .catch(err => console.error('MongoDB connection error:', err));
-require('./db/connection'); // Keep this if your connection logic is in this file
+require('./db/connection'); 
 
 // Import Models
-const Users = require('./models/Users'); // Corrected path to 'User' singular as per common practice
+const Users = require('./models/Users'); 
 const Conversation = require('./models/Conversation');
 const Messages = require('./models/Messages');
 
-// Middleware for Express REST API
-app.use(express.json()); // For parsing application/json bodies
-app.use(cors({ // Apply CORS middleware for all Express routes
-    origin: process.env.FRONTEND_URL,
+
+const allowedOrigins = [
+  'https://chat-app-brown-xi-79.vercel.app', // live frontend
+  'http://localhost:3000',                   // local frontend
+];
+
+app.use(express.json()); 
+app.use(cors({ 
+    // origin: process.env.FRONTEND_URL,
+    allowedOrigins,
     methods: ["GET", "POST", "PUT", "DELETE"]
 }));
 
@@ -106,6 +106,7 @@ app.get('/', (req, res) => {
 app.post('/api/register', async (req, res) => {
     try {
         const { fullName, email, password } = req.body;
+
 
         if (!fullName || !email || !password) {
             return res.status(400).json({ error: 'Please fill all fields.' });
